@@ -6,3 +6,4 @@ soundfile
 numpy
 yt-dlp
 faster-whisper
+psutil

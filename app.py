@@ -25,6 +25,7 @@ from window_controller import enter_viernes_compact, restore_viernes_window
 from youtube import search_and_play, pause_playback
 from audio import save_room_audio
 from reply_audio import resolve_reply_wav, store_reply_wav
+from system_metrics import read_metrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
@@ -120,6 +121,12 @@ def health() -> dict[str, str | None]:
         "voice": VOICE,
         "lastFolder": get_last_folder(),
     }
+
+
+@app.get("/system/metrics")
+def system_metrics() -> dict:
+    """CPU, RAM y VRAM. La VRAM libre es lo que decide si cabe un modelo local."""
+    return read_metrics()
 
 
 @app.post("/tts")
