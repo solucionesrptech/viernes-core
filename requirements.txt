@@ -1,5 +1,9 @@
 fastapi
 uvicorn[standard]
+python-multipart
 kokoro>=0.9.4
 soundfile
 numpy
+yt-dlp
+faster-whisper
+psutil
