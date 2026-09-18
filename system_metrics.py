@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import psutil
 
@@ -73,12 +74,29 @@ def _read_cpu_pct() -> float:
 def _read_host() -> dict:
     memory = psutil.virtual_memory()
     mib = 1024 * 1024
-    return {
+    host: dict = {
         "cpuPct": round(_read_cpu_pct(), 1),
         "ramUsedMb": (memory.total - memory.available) // mib,
         "ramFreeMb": memory.available // mib,
         "ramTotalMb": memory.total // mib,
+        # CPU temp: no hay fuente fiable en V0 (psutil/sensors no en Windows).
+        "cpuTempC": None,
     }
+    # Disco del volumen donde vive el código de Viernes (D: en este PC).
+    # Si falla, disk queda None — el panel muestra N/A, no inventa.
+    try:
+        root = Path(__file__).resolve().anchor
+        usage = psutil.disk_usage(root)
+        host["disk"] = {
+            "path": root,
+            "usedGb": round(usage.used / (1024**3), 1),
+            "totalGb": round(usage.total / (1024**3), 1),
+            "pct": round(usage.percent, 1),
+        }
+    except (OSError, ValueError) as exc:
+        logger.error("disk_usage no disponible: %s", exc)
+        host["disk"] = None
+    return host
 
 
 def read_metrics() -> dict:
