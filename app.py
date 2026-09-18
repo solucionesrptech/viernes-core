@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from io import BytesIO
 import logging
 import unicodedata
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import soundfile as sf
@@ -26,10 +27,34 @@ from youtube import search_and_play, pause_playback
 from audio import save_room_audio
 from reply_audio import resolve_reply_wav, store_reply_wav
 from system_metrics import read_metrics
+from registry import (
+    core_uptime_s,
+    get_node,
+    init_registry,
+    list_nodes,
+    record_desktop_heartbeat,
+    rooms_transport_map,
+    start_background_poll,
+    stop_background_poll,
+)
+from telemetry import ingest_external, last_voice, list_events, emit
+from ui_pending import peek_pending, set_pending, take_pending
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
-app = FastAPI(title="Viernes Core", version="0.3.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_registry()
+    start_background_poll()
+    logging.getLogger("viernes.boot").info("[BOOT] registry+telemetry listos")
+    try:
+        yield
+    finally:
+        stop_background_poll()
+
+
+app = FastAPI(title="Viernes Core", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +63,8 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5175",
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
@@ -114,19 +141,117 @@ def generate_wav(text: str, speed: float) -> bytes:
 
 
 @app.get("/health")
-def health() -> dict[str, str | None]:
+def health() -> dict[str, str | float | None]:
     return {
         "status": "ok",
         "tts": "kokoro",
         "voice": VOICE,
         "lastFolder": get_last_folder(),
+        "uptimeS": core_uptime_s(),
     }
 
 
 @app.get("/system/metrics")
 def system_metrics() -> dict:
     """CPU, RAM y VRAM. La VRAM libre es lo que decide si cabe un modelo local."""
-    return read_metrics()
+    data = read_metrics()
+    data["uptimeS"] = core_uptime_s()
+    data["coreOnline"] = True
+    return data
+
+
+@app.get("/nodes")
+def nodes_list() -> dict[str, Any]:
+    return {"nodes": list_nodes(), "transportRooms": rooms_transport_map()}
+
+
+@app.get("/nodes/{node_id}")
+def nodes_get(node_id: str) -> dict[str, Any]:
+    node = get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Nodo desconocido: {node_id}")
+    return node
+
+
+class DesktopHeartbeatRequest(BaseModel):
+    listening: bool | None = None
+    workspace: str | None = Field(default=None, max_length=64)
+    windowMode: str | None = Field(default=None, max_length=32)
+    ua: str | None = Field(default=None, max_length=256)
+
+
+@app.post("/nodes/desktop-main/heartbeat")
+def desktop_heartbeat(request: DesktopHeartbeatRequest) -> dict[str, Any]:
+    snap = record_desktop_heartbeat(request.model_dump(exclude_none=True))
+    return {"success": True, "node": snap}
+
+
+class TelemetryEventIn(BaseModel):
+    eventType: str = Field(min_length=1, max_length=64)
+    sourceNode: str | None = Field(default=None, max_length=64)
+    sourceRoom: str | None = Field(default=None, max_length=64)
+    sessionId: str | None = Field(default=None, max_length=64)
+    text: str | None = Field(default=None, max_length=2000)
+    intent: str | None = Field(default=None, max_length=64)
+    targetNode: str | None = Field(default=None, max_length=64)
+    responseNode: str | None = Field(default=None, max_length=64)
+    result: str | None = Field(default=None, max_length=64)
+    latencyMs: float | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@app.post("/telemetry/events")
+def telemetry_post(event: TelemetryEventIn) -> dict[str, Any]:
+    try:
+        stored = ingest_external(event.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "event": stored}
+
+
+@app.get("/telemetry/events")
+def telemetry_get(
+    source: str | None = Query(default=None, max_length=64),
+    errors: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=400),
+) -> dict[str, Any]:
+    return {"events": list_events(source=source, errors_only=errors, limit=limit)}
+
+
+@app.get("/telemetry/last-voice")
+def telemetry_last_voice() -> dict[str, Any]:
+    return {"lastVoice": last_voice()}
+
+
+class UiPendingIn(BaseModel):
+    action: Literal["SHOW_HOME", "SHOW_CONTROL"]
+    sourceNode: str | None = Field(default=None, max_length=64)
+    sourceRoom: str | None = Field(default=None, max_length=64)
+
+
+@app.get("/ui/pending")
+def ui_pending_get(consume: bool = Query(default=True)) -> dict[str, Any]:
+    item = take_pending() if consume else peek_pending()
+    return {"pending": item}
+
+
+@app.post("/ui/pending")
+def ui_pending_post(request: UiPendingIn) -> dict[str, Any]:
+    item = set_pending(
+        request.action,
+        source_node=request.sourceNode,
+        source_room=request.sourceRoom,
+    )
+    emit(
+        "UI_ACTION",
+        source_node=request.sourceNode or "core",
+        source_room=request.sourceRoom,
+        target_node="desktop-main",
+        response_node="desktop-main",
+        result="QUEUED",
+        metadata={"action": request.action},
+    )
+    return {"success": True, "pending": item}
 
 
 @app.post("/tts")
@@ -272,22 +397,61 @@ async def room_audio(
     result.setdefault("reply_audio_url", None)
     reply = result.get("reply")
     if isinstance(reply, str) and reply.strip():
+        source_node = result.get("sourceNode")
+        source_room = result.get("sourceRoom")
+        session_id = result.get("sessionId")
         try:
+            emit(
+                "TTS_STARTED",
+                source_node=source_node if isinstance(source_node, str) else None,
+                source_room=source_room if isinstance(source_room, str) else None,
+                session_id=session_id if isinstance(session_id, str) else None,
+                text=reply.strip(),
+                target_node="core",
+                response_node=source_node if isinstance(source_node, str) else None,
+            )
             wav = generate_wav(reply.strip(), 1.0)
             _filename, url = store_reply_wav(wav)
             result["reply_audio_url"] = url
+            emit(
+                "TTS_COMPLETED",
+                source_node=source_node if isinstance(source_node, str) else None,
+                source_room=source_room if isinstance(source_room, str) else None,
+                session_id=session_id if isinstance(session_id, str) else None,
+                text=reply.strip(),
+                target_node="core",
+                response_node=source_node if isinstance(source_node, str) else None,
+                result="SUCCESS",
+                metadata={"replyAudioUrl": url},
+            )
             logging.getLogger("viernes.reply_audio").info(
                 "[TTS] room=%s reply_audio_url=%s",
                 result.get("room"),
                 url,
             )
         except HTTPException as exc:
+            emit(
+                "SYSTEM_ERROR",
+                source_node=source_node if isinstance(source_node, str) else None,
+                source_room=source_room if isinstance(source_room, str) else None,
+                session_id=session_id if isinstance(session_id, str) else None,
+                result="tts_failed",
+                metadata={"detail": str(exc.detail)},
+            )
             logging.getLogger("viernes.reply_audio").error(
                 "[TTS] generate failed room=%s detail=%s",
                 result.get("room"),
                 exc.detail,
             )
         except OSError as exc:
+            emit(
+                "SYSTEM_ERROR",
+                source_node=source_node if isinstance(source_node, str) else None,
+                source_room=source_room if isinstance(source_room, str) else None,
+                session_id=session_id if isinstance(session_id, str) else None,
+                result="tts_store_failed",
+                metadata={"message": str(exc)},
+            )
             logging.getLogger("viernes.reply_audio").error(
                 "[TTS] store failed room=%s err=%s",
                 result.get("room"),

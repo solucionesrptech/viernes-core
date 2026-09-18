@@ -11,7 +11,9 @@ import os
 # room_id -> base URL del nodo (sin path final).
 # Override por env: VIERNES_ROOM_<ROOM> (ej. VIERNES_ROOM_BANO).
 _DEFAULT_ROOMS: dict[str, str] = {
-    # P20 (alias lógico futuro: aqua). No renombrar: el nodo vivo publica room=bano.
+    # P20 — nodo Aqua (baño). Path legacy del nodo vivo: room=bano.
+    # "aqua" es alias de transporte; la identidad estable es nodeId=aqua.
+    "aqua": "http://192.168.1.96:8080",
     "bano": "http://192.168.1.96:8080",
     # Override real: VIERNES_ROOM_DORMITORIO=http://IP:8080
     "dormitorio": "http://192.168.1.97:8080",
