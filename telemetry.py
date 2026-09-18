@@ -92,7 +92,8 @@ def _update_last_voice(event: dict[str, Any]) -> None:
         base["sourceRoom"] = event["sourceRoom"]
     if event.get("sessionId"):
         base["sessionId"] = event["sessionId"]
-    if event.get("text") is not None:
+    # El texto del ciclo es el STT; no dejar que TTS/reply lo pisen.
+    if event.get("eventType") == "STT_RESULT" and event.get("text") is not None:
         base["text"] = event["text"]
     if event.get("intent") is not None:
         base["intent"] = event["intent"]
@@ -104,6 +105,8 @@ def _update_last_voice(event: dict[str, Any]) -> None:
         base["result"] = event["result"]
     if event.get("latencyMs") is not None:
         base["latencyMs"] = event["latencyMs"]
+    if event.get("eventType") == "TTS_COMPLETED" and event.get("text"):
+        base["reply"] = event["text"]
     et = event["eventType"]
     base["lastEventType"] = et
     _last_voice = base
